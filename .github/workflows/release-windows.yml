@@ -1,0 +1,175 @@
+name: Release Windows App
+
+on:
+  push:
+    branches:
+      - main
+    paths-ignore:
+      - '**/*.md'
+      - '.claude/**'
+      - '.codex/**'
+      - '.gemini/**'
+      - '.github/**'
+      - 'codex_help.txt'
+      - 'codex_review_current.txt'
+      - 'codex_review_final.txt'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Optional release tag (example: v1.0.1)"
+        required: false
+        type: string
+      prerelease:
+        description: "Publish as prerelease"
+        required: true
+        default: true
+        type: boolean
+
+concurrency:
+  group: release-windows-${{ github.ref_name }}-${{ inputs.tag || 'edge' }}
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+jobs:
+  release-windows:
+    name: Build and publish Windows release
+    runs-on: windows-latest
+    timeout-minutes: 40
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: 20
+          cache: 'npm'
+          cache-dependency-path: package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build Windows app
+        run: npm run build && npx electron-builder --win --publish never
+
+      - name: Verify build output
+        shell: pwsh
+        run: |
+          $assets = Get-ChildItem -Path release -Filter *.exe -File -ErrorAction SilentlyContinue
+          if (-not $assets) {
+            throw "No .exe files found in release/ directory."
+          }
+          Write-Host "Found $($assets.Count) release asset(s):"
+          $assets | ForEach-Object { Write-Host "  - $($_.Name)" }
+
+      - name: Compute release metadata
+        id: meta
+        shell: pwsh
+        env:
+          INPUT_TAG: ${{ inputs.tag }}
+          INPUT_PRERELEASE: ${{ inputs.prerelease }}
+        run: |
+          $shortSha = $env:GITHUB_SHA.Substring(0, 7)
+          $stamp = Get-Date -Format "yyyyMMdd-HHmmss"
+
+          if ($env:GITHUB_EVENT_NAME -eq "workflow_dispatch" -and -not [string]::IsNullOrWhiteSpace($env:INPUT_TAG)) {
+            $semverPattern = '^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(?:-((?:0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*)(?:\.(?:0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*))*))?$'
+            if ($env:INPUT_TAG -cnotmatch $semverPattern) {
+              throw "Invalid tag format: '$($env:INPUT_TAG)'. Expected: v1.0.0 or v1.0.0-beta.1"
+            }
+            $tag = $env:INPUT_TAG
+            $title = $env:INPUT_TAG
+            $isPre = $env:INPUT_PRERELEASE
+          } elseif ($env:GITHUB_EVENT_NAME -eq "workflow_dispatch") {
+            $tag = "edge-$stamp-$($env:GITHUB_RUN_ID)-$shortSha"
+            $title = "Edge build $stamp ($shortSha)"
+            $isPre = "true"
+          } else {
+            $tag = "edge-$stamp-$($env:GITHUB_RUN_ID)-$shortSha"
+            $title = "Edge build $stamp ($shortSha)"
+            $isPre = "true"
+          }
+
+          "tag=$tag" >> $env:GITHUB_OUTPUT
+          "title=$title" >> $env:GITHUB_OUTPUT
+          "is_prerelease=$isPre" >> $env:GITHUB_OUTPUT
+
+      - name: Verify manual tag target
+        if: github.event_name == 'workflow_dispatch' && inputs.tag != ''
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ steps.meta.outputs.tag }}
+        run: |
+          $refResponse = gh api "repos/$env:GITHUB_REPOSITORY/git/ref/tags/$($env:RELEASE_TAG)" | ConvertFrom-Json
+
+          if ($refResponse.object.type -eq 'commit') {
+            $tagCommit = $refResponse.object.sha
+          } elseif ($refResponse.object.type -eq 'tag') {
+            $tagObject = gh api "repos/$env:GITHUB_REPOSITORY/git/tags/$($refResponse.object.sha)" | ConvertFrom-Json
+            $tagCommit = $tagObject.object.sha
+          } else {
+            throw "Unsupported git ref object type '$($refResponse.object.type)' for tag '$($env:RELEASE_TAG)'."
+          }
+
+          if ($tagCommit -ne $env:GITHUB_SHA) {
+            throw "Tag '$($env:RELEASE_TAG)' points to $($tagCommit.Substring(0,7)) but this build is from $($env:GITHUB_SHA.Substring(0,7)). Run the workflow from the tagged commit."
+          }
+
+      - name: Create GitHub release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          INPUT_TAG: ${{ inputs.tag }}
+          RELEASE_TAG: ${{ steps.meta.outputs.tag }}
+          RELEASE_TITLE: ${{ steps.meta.outputs.title }}
+          RELEASE_IS_PRERELEASE: ${{ steps.meta.outputs.is_prerelease }}
+        run: |
+          $notes = @"
+          ## Highlights
+          - Windows build for Web Tracker
+          - Built from commit $env:GITHUB_SHA
+          - This build is unsigned, so Windows or antivirus warnings may appear
+
+          ## Assets
+          "@
+
+          $releaseAssets = Get-ChildItem -Path release -Filter *.exe -File -ErrorAction Stop |
+            Sort-Object Name
+          if (-not $releaseAssets) {
+            throw "No .exe files found in release/ directory."
+          }
+          $assetList = ($releaseAssets | ForEach-Object { "- $($_.Name)" }) -join "`n"
+          $notes += "`n$assetList`n`n## Download`nPlease use the uploaded release assets (.exe files), not the source code archives."
+
+          $assetPaths = @($releaseAssets | Select-Object -ExpandProperty FullName)
+
+          $ghArgs = @(
+            "release", "create", $env:RELEASE_TAG,
+            "--target", $env:GITHUB_SHA
+          ) + $assetPaths + @(
+            "--title", $env:RELEASE_TITLE,
+            "--generate-notes",
+            "--notes", $notes
+          )
+
+          if ($env:RELEASE_IS_PRERELEASE -eq "true") {
+            $ghArgs += "--prerelease"
+          }
+
+          # Edge builds should never be "latest", regardless of prerelease flag
+          if ($env:RELEASE_TAG.StartsWith("edge-")) {
+            $ghArgs += "--latest=false"
+          }
+
+          if ($env:GITHUB_EVENT_NAME -eq "workflow_dispatch" -and -not [string]::IsNullOrWhiteSpace($env:INPUT_TAG)) {
+            $ghArgs += "--verify-tag"
+          }
+
+          gh @ghArgs
