@@ -1,3 +1,4 @@
+// PR validation workflow test - to be removed
 export const WIDTH = 1280;
 export const HEIGHT = 720;
 export const MIRROR_X = true;
