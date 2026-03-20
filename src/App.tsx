@@ -9,9 +9,6 @@ import { ControlPanel } from './components/ControlPanel';
 import { useMediaPipe } from './hooks/useMediaPipe';
 import { useThreeManager } from './hooks/useThreeManager';
 
-// CI test: intentional TypeScript error (will pass lint, fail tsc)
-export function ciBuildFailure(x: number): void { x.toUpperCase(); }
-
 interface HandCalibration {
   leftHandSize: number | null;
   rightHandSize: number | null;
