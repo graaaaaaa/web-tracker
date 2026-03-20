@@ -9,6 +9,9 @@ import { ControlPanel } from './components/ControlPanel';
 import { useMediaPipe } from './hooks/useMediaPipe';
 import { useThreeManager } from './hooks/useThreeManager';
 
+// CI test: intentional lint error (unused variable)
+const _ci_unused_lint_test = 'this will fail lint';
+
 interface HandCalibration {
   leftHandSize: number | null;
   rightHandSize: number | null;
