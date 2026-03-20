@@ -37,6 +37,16 @@ jobs:
 
     steps:
       # ----------------------------------------------------------
+      # Step 0: Reject tag-based dispatch
+      # ----------------------------------------------------------
+      - name: Reject tag-based dispatch
+        if: github.ref_type == 'tag'
+        shell: bash
+        run: |
+          echo "::error title=Invalid Dispatch::This workflow was triggered from a tag. Select a branch from the 'Use workflow from' dropdown and re-run."
+          exit 1
+
+      # ----------------------------------------------------------
       # Step 1: Validate branch input and resolve to immutable SHA
       # (Trusted step — runs BEFORE untrusted code checkout)
       # ----------------------------------------------------------
@@ -180,8 +190,23 @@ jobs:
           GITHUB_STEP_SUMMARY: ${{ runner.temp }}\blocked-github-step-summary.md
         run: |
           npm ci
+          $exitCode = $LASTEXITCODE
+          if ($exitCode -ne 0) {
+              Write-Output "::error title=npm ci Failed::Dependency installation failed."
+              exit $exitCode
+          }
           npm run build
+          $exitCode = $LASTEXITCODE
+          if ($exitCode -ne 0) {
+              Write-Output "::error title=Build Failed::Frontend build failed."
+              exit $exitCode
+          }
           npx electron-builder --win --publish never
+          $exitCode = $LASTEXITCODE
+          if ($exitCode -ne 0) {
+              Write-Output "::error title=Packaging Failed::Electron builder packaging failed."
+              exit $exitCode
+          }
 
       # ----------------------------------------------------------
       # Step 7: Upload artifact (immutable, overwrite disabled)
@@ -319,7 +344,10 @@ jobs:
           done
 
           # --- Compute SHA256 checksums in THIS job (not from build) ---
-          sha256sum -- *.exe > SHA256SUMS.txt
+          sha256sum -- *.exe > SHA256SUMS.txt || {
+            echo "::error title=Checksum Failed::SHA256 checksum computation failed."
+            exit 1
+          }
           echo "=== SHA256 Checksums ==="
           cat SHA256SUMS.txt
 
@@ -363,6 +391,9 @@ jobs:
             --notes-file release_notes.md \
             --prerelease \
             --latest=false \
-            -- "${upload_files[@]}"
+            -- "${upload_files[@]}" || {
+            echo "::error title=Release Failed::Failed to create pre-release. Check for tag conflicts."
+            exit 1
+          }
 
           echo "Release created: $tag"
